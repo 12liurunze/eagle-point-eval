@@ -67,7 +67,7 @@ bash scripts/pointllm_generate_data.sh
 ```
 
 Common overrides:
-
+model weights and dataset could refer to this link:https://github.com/12liurunze/PointLLM
 ```bash
 POINTLLM_REPO=/path/to/pointLLM \
 BASE_MODEL=/path/to/point7B_v1.1 \

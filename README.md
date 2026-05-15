@@ -1,134 +1,183 @@
-# Eagle eye
+# Eagle Point Eval
 
-## 介绍
-目前Eagle-eye已经具备完成了训练以及推理部分的测试，表现出了一定的加速效果。目前兼容llava-v1.5-7b和Qwen2.5-VL-7B-Instruct两个模型。
+This repository adapts **EAGLE-EYE** speculative decoding to **PointLLM** for 3D point-cloud language generation. It provides scripts for generating draft-head training data, training a PointLLM draft head, running EAGLE-style generation, and comparing speculative decoding against vanilla autoregressive PointLLM decoding.
 
-## 安装 `eagle_eye` 
+The project is mainly intended for PointLLM-7B experiments on Objaverse-style point-cloud data.
 
-**新：为了适配qwen2.5vl，transformers>=4.49.0,这里建议选择4.51.1**
+## Features
 
+- PointLLM draft-head training data generation
+- PointLLM EAGLE draft-head training
+- Single-sample speculative decoding inference
+- Batch comparison between autoregressive PointLLM and EAGLE decoding
+- Timing summary for speedup evaluation
+- Compatibility scripts for Linux and PowerShell
+
+## Repository Structure
+
+```text
+.
+├── EAGLE_EYE/
+│   ├── eagle_eye/
+│   │   ├── evaluation/
+│   │   │   ├── compare_pointllm_eagle.py
+│   │   │   └── gen_ee_answer_pointllm.py
+│   │   ├── ge_data/
+│   │   │   └── get_data_all_pointllm.py
+│   │   ├── model/
+│   │   │   ├── point_ee_model.py
+│   │   │   └── pointllm_tree_modeling.py
+│   │   └── train/
+│   │       ├── pointllm_7B_config.json
+│   │       └── train_pointllm.py
+│   ├── requirements.txt
+│   └── setup.py
+└── scripts/
+    ├── pointllm_generate_data.sh
+    ├── pointllm_train_head.sh
+    ├── pointllm_infer_one.sh
+    └── pointllm_compare_eagle.sh
 ```
+
+## Environment
+
+Install the package in editable mode:
+
+```bash
 cd EAGLE_EYE
 pip install -e .
 ```
-## 推理
 
-我们提供的推理代码会自动分配模型权重（在多个 GPU 上加载模型），从而允许您运行超过单个 GPU 内存的模型。
+The PointLLM codebase must also be available locally. The scripts use the following default paths on AutoDL-style servers:
 
-**新：高版本transformers提供了chat_template，这里使用其来帮助进行推理。**
-
-### 使用代码
-
-您可以使用我们提供的“eagenerate” 来加速生成，就像使用 Hugging Face 的 “generate” 一样。下面是一个示例。
-
-**新：推理过程中有一些要注意的问题**
-
-**1.qwen2.5vl当以torch.bfloat16加载模型时无论是否使用eagle推理，输出有概率会出现乱码（猜测是transformers的问题)，所以只支持以torch.float16来加载模型。**
-
-**2.Qwen2.5-VL-7B-Instruct在实际运行中显存占用会超过一张3090的显存，这里在使用qwen2.5vl推理时建议将device_map="auto"，保证有足够的显存，llava的话设置为"cuda:0"即可。**
-
-**3.一定要设置为attn_implementation="eager"，由于transformers默认使用SdpaAttention来进行推理，eagle的实现是基于普通的attention，所以要这样设置。**
-
-```python
-from eagle_eye.model.ee_model import EeModel
-
-import torch
-from PIL import Image
-import os
-import time
-
-# base_model_path = "/home/dhz/llava-v1.5-7b-hf"
-# ee_model_path = "/home/dhz/tmp_model/EAGLE-EYE-LLaVA-7B-10k"
-
-base_model_path = "/home/dhz/Qwen2.5-VL-7B-Instruct"
-ee_model_path = "/home/dhz/tmp_model/EAGLE-EYE-Qwen2.5vl-7B-10k"
-
-model = EeModel.from_pretrained(
-    base_model_path=base_model_path,
-    ee_model_path=ee_model_path,
-    torch_dtype=torch.float16,
-    low_cpu_mem_usage=True,
-    device_map="auto",
-    attn_implementation="eager"
-)
-model.eval()
-
-url = "/home/dhz/eagle-eye/EAGLE_EYE/eagle_eye/example.jpg"
-
-image = Image.open(url)
-
-messages = [
-    {
-        "role": "user",
-        "content": [
-            {
-                "type": "image",
-                "image": url,
-            },
-            {"type": "text", "text": "Describe the image in detail."},
-        ],
-    }
-]
-
-text = model.processor.apply_chat_template(
-    messages,
-    tokenize=False,
-    add_generation_prompt=True
-) 
-
-inputs = model.processor(images=image, text=text , return_tensors='pt').to(model.base_model.device)
-
-output_ids = model.eagenerate(**inputs,temperature=0.0, max_new_tokens=200)
-
-output = model.processor.tokenizer.decode(output_ids[0][inputs.input_ids.shape[-1]:],skip_special_tokens=True)
-print(output)
-
+```text
+PointLLM repo:      /root/autodl-tmp/pointLLM
+Base model:         /root/autodl-tmp/point7B_v1.1
+Point cloud data:   /root/autodl-tmp/pointLLM/data/objaverse_data
+Validation JSON:    /root/autodl-tmp/pointLLM/data/anno_data/PointLLM_brief_description_val_200_GT.json
+Draft head output:  /root/autodl-tmp/pointllm_eagle_head
 ```
 
-注意：LLaVA 和qwen2.5vl都是聊天模型。您需要使用正确的聊天模板，否则会导致模型输出异常，影响 EAGLE-EYE的性能。
+You can override these defaults with environment variables.
 
-## 训练
+## Generate Draft-Head Training Data
 
-### 生成训练数据
-
-您可以执行以下命令来生成训练数据。
-
-```python
-cd ge_data/
-python get_data_all_llava.py -outdir [path of data]
-
-python get_data_all_qwen2.5vl.py -outdir [path of data]
+```bash
+bash scripts/pointllm_generate_data.sh
 ```
 
-### 训练自回归头
+Common overrides:
 
-```
-cd train/
-python train_llava.py --tmpdir [path of data]\
---cpdir [path of checkpoints] -- configpath [path of config file]
-
-python train_qwenvl2.5.py --tmpdir [path of data]\
---cpdir [path of checkpoints] -- configpath [path of config file]
-```
-
-## 评估
-
-您可以使用以下命令在COCO-caption上测试EAGLE-EYE的速度。
-
-```
-cd evaluation/
-python gen_ee_answer_llava.py  --ee-model-path [path of EAGLE-EYE weight]\ --base-model-path [path of the original model]\
-
-python gen_ee_answer_qwen2.5vl_video.py  --ee-model-path [/root/autodl-tmp/qwen]\ --base-model-path [/root/autodl-tmp/qwen2.5vl]\
+```bash
+POINTLLM_REPO=/path/to/pointLLM \
+BASE_MODEL=/path/to/point7B_v1.1 \
+POINT_CLOUD_DATA=/path/to/objaverse_data \
+ANNOTATION=/path/to/PointLLM_complex_instruction_70K.json \
+OUTPUT_DIR=/path/to/pointllm_eagle_data \
+bash scripts/pointllm_generate_data.sh
 ```
 
-如果你需要特定的加速比，你还需要运行以下命令来获取原版自动回归的速度。
+Useful range controls:
 
-```
-python  gen_baseline_answer_llava.py -ee-model-path [path of EAGLE-EYE weight]\ --base-model-path [path of the original model]\
-
-
-python  gen_baseline_answer_qwen2.5vl.py -ee-model-path [path of EAGLE-EYE weight]\ --base-model-path [path of the original model]\
+```bash
+START=0 END=10000 INDEX=0 bash scripts/pointllm_generate_data.sh
 ```
 
-以上两个命令都会生成一个 .jsonl 文件，记录生成结果和实际时间。然后，您可以使用 evaluation/speed.py 来计算速度比率。
+## Train the PointLLM Draft Head
+
+```bash
+bash scripts/pointllm_train_head.sh
+```
+
+Common overrides:
+
+```bash
+DATA_DIR=/path/to/pointllm_eagle_data \
+HEAD_DIR=/path/to/pointllm_eagle_head \
+BATCH_SIZE=24 \
+NUM_EPOCHS=20 \
+MIXED_PRECISION=no \
+bash scripts/pointllm_train_head.sh
+```
+
+The trained draft head is saved to `HEAD_DIR`.
+
+## Run One Inference Example
+
+Use the first sample from the validation JSON:
+
+```bash
+VAL_INDEX=0 bash scripts/pointllm_infer_one.sh
+```
+
+Run with a specific object id and question:
+
+```bash
+AUTO_READ_OBJECT_IDS=0 \
+bash scripts/pointllm_infer_one.sh <object_id> "Describe this 3D object in detail."
+```
+
+Important generation parameters:
+
+```bash
+MAX_NEW_TOKENS=256 MAX_LENGTH=2048 TORCH_DTYPE=float32 bash scripts/pointllm_infer_one.sh
+```
+
+## Compare Autoregressive and EAGLE Decoding
+
+```bash
+bash scripts/pointllm_compare_eagle.sh
+```
+
+This runs both vanilla PointLLM autoregressive decoding and EAGLE speculative decoding on the validation set, then writes:
+
+```text
+OUTPUT_JSONL:  per-sample outputs and timing
+SUMMARY_JSON:  aggregate timing and speedup summary
+```
+
+Example:
+
+```bash
+HEAD_DIR=/root/autodl-tmp/pointllm_eagle_head \
+VAL_JSON=/root/autodl-tmp/pointLLM/data/anno_data/PointLLM_brief_description_val_200_GT.json \
+OUTPUT_JSONL=/root/autodl-tmp/pointllm_compare_eagle.jsonl \
+SUMMARY_JSON=/root/autodl-tmp/pointllm_compare_eagle_summary.json \
+bash scripts/pointllm_compare_eagle.sh
+```
+
+To evaluate a subset:
+
+```bash
+START=0 END=20 bash scripts/pointllm_compare_eagle.sh
+```
+
+## Main Environment Variables
+
+| Variable | Description |
+| --- | --- |
+| `POINTLLM_REPO` | Path to the PointLLM repository |
+| `BASE_MODEL` | Path to the original PointLLM base model |
+| `POINT_CLOUD_DATA` | Directory containing point-cloud `.npy` data |
+| `ANNOTATION` | Training annotation JSON |
+| `VAL_JSON` | Evaluation annotation JSON |
+| `DATA_DIR` | Generated draft-head training data directory |
+| `HEAD_DIR` | Draft-head checkpoint directory |
+| `OUTPUT_JSONL` | Per-sample evaluation output |
+| `SUMMARY_JSON` | Aggregate evaluation summary |
+| `TORCH_DTYPE` | Model dtype, default `float32` |
+| `MAX_NEW_TOKENS` | Maximum generated tokens |
+| `TEMPERATURE` | Sampling temperature, default `0.0` |
+| `TOP_P` | Top-p sampling value |
+| `TOP_K` | Top-k sampling value |
+
+## Notes
+
+- The verifier path uses the original PointLLM model.
+- The draft path uses the trained EAGLE draft head.
+- Keep the training data generation setup consistent with inference and evaluation settings.
+- Large model weights, generated hidden states, and evaluation outputs should not be committed to Git.
+
+## Acknowledgements
+
+This project builds on EAGLE-EYE and PointLLM. It is intended as an experimental codebase for studying speculative decoding acceleration in point-cloud language models.
